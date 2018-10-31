@@ -1,0 +1,76 @@
+/*
+ * Copyright © 2011-2015 the spray project <http://spray.io>
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package spray.routing
+package directives
+
+import scala.concurrent.{ ExecutionContext, Future }
+import shapeless.HNil
+import spray.routing.authentication._
+import AuthenticationFailedRejection.CredentialsMissing
+import BasicDirectives._
+import FutureDirectives._
+import MiscDirectives._
+import RouteDirectives._
+
+trait SecurityDirectives {
+
+  /**
+   * Wraps its inner Route with authentication support.
+   * Can be called either with a ``Future[Authentication[T]]`` or ``ContextAuthenticator[T]``.
+   */
+  def authenticate[T](magnet: AuthMagnet[T]): Directive1[T] = magnet.directive
+
+  /**
+   * Wraps its inner Route with optional authentication support.
+   * Can be called either with a ``Future[Authentication[T]]`` or ``ContextAuthenticator[T]``.
+   */
+  def optionalAuthenticate[T](magnet: AuthMagnet[T]): Directive1[Option[T]] = magnet.optionalDirective
+
+  /**
+   * Applies the given authorization check to the request.
+   * If the check fails the route is rejected with an [[spray.AuthorizationFailedRejection]].
+   */
+  def authorize(check: ⇒ Boolean): Directive0 = authorize(_ ⇒ check)
+
+  /**
+   * Applies the given authorization check to the request.
+   * If the check fails the route is rejected with an [[spray.AuthorizationFailedRejection]].
+   */
+  def authorize(check: RequestContext ⇒ Boolean): Directive0 =
+    extract(check).flatMap[HNil](if (_) pass else reject(AuthorizationFailedRejection)) &
+      cancelRejection(AuthorizationFailedRejection)
+}
+
+class AuthMagnet[T](authDirective: Directive1[Authentication[T]])(implicit executor: ExecutionContext) {
+  val directive: Directive1[T] = authDirective.flatMap {
+    case Right(user)     ⇒ provide(user)
+    case Left(rejection) ⇒ reject(rejection)
+  }
+  val optionalDirective: Directive1[Option[T]] = authDirective.flatMap {
+    case Right(user) ⇒ provide(Some(user))
+    case Left(AuthenticationFailedRejection(CredentialsMissing, _)) ⇒ provide(None)
+    case Left(rejection) ⇒ reject(rejection)
+  }
+}
+
+object AuthMagnet {
+  implicit def fromFutureAuth[T](auth: ⇒ Future[Authentication[T]])(implicit executor: ExecutionContext): AuthMagnet[T] =
+    new AuthMagnet(onSuccess(auth))
+
+  implicit def fromContextAuthenticator[T](auth: ContextAuthenticator[T])(implicit executor: ExecutionContext): AuthMagnet[T] =
+    new AuthMagnet(extract(auth).flatMap(onSuccess(_)))
+}
